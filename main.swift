@@ -47,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             menu.addItem(action("⚠️ Grant Accessibility access…", #selector(openAccessibility)))
             menu.addItem(.separator())
         }
-        // Pause → Settings → controller + battery → Quit, then the layout below.
+        // Pause → Settings → battery → Setup Guide → Quit, then the layout below.
         menu.addItem(action(pad.enabled ? "Pause" : "Resume", #selector(toggleEnabled)))
         let settings = action("Settings…", #selector(openSettings))
         settings.keyEquivalent = ","
@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             return "Battery \(Int((b.batteryLevel * 100).rounded()))%" + (b.batteryState == .charging ? " charging" : "")
         } ?? "No controller connected"
         menu.addItem(disabled(status + (pad.enabled ? "" : " (paused)")))
+        menu.addItem(action("Setup Guide…", #selector(openSetup)))
         menu.addItem(NSMenuItem(title: "Quit SwitchUp", action: #selector(NSApp.terminate(_:)), keyEquivalent: "q"))
 
         // Current layout, Magnet-style: action on the left, button on the right.
@@ -79,8 +80,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         for id in ButtonID.allCases where c.mapping(id).action == .customShortcut {
             menu.addItem(controlRow("Shortcut \(c.mapping(id).keyLabel)", id.short))
         }
-        menu.addItem(.separator())
-        menu.addItem(action("Setup Guide…", #selector(openSetup)))
     }
 
     private func controlRow(_ title: String, _ button: String) -> NSMenuItem {
