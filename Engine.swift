@@ -350,7 +350,7 @@ final class SwitchUp {
         case .closeTab: synth.tap(Key.w, flags: .maskCommand)
         case .closeWindow: synth.tap(Key.w, flags: [.maskCommand, .maskShift])
         case .addressBar: synth.tap(Key.l, flags: .maskCommand)
-        case .spotlight: synth.tap(Key.space, flags: .maskCommand)
+        case .spotlight: toggleSpotlight()
         case .doubleClick: synth.doubleClick()
         case .reopenTab: synth.tap(Key.t, flags: [.maskCommand, .maskShift])
         case .ytPlayPause: synth.tap(Key.k)
@@ -391,6 +391,27 @@ final class SwitchUp {
         case .precisionToggle: precisionToggled.toggle()
         case .pauseSwitchUp: enabled.toggle()
         default: break
+        }
+    }
+
+    // MARK: Spotlight
+
+    /// A synthetic ⌘Space opens Spotlight but doesn't close it the way the real key does,
+    /// so close it with Esc (twice if the first only cleared the query).
+    private func toggleSpotlight() {
+        guard spotlightVisible() else { synth.tap(Key.space, flags: .maskCommand); return }
+        synth.tap(Key.escape)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            if self?.spotlightVisible() == true { self?.synth.tap(Key.escape) }
+        }
+    }
+
+    private func spotlightVisible() -> Bool {
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        return windows.contains { w in
+            (w[kCGWindowOwnerName as String] as? String) == "Spotlight"
+                && (w[kCGWindowAlpha as String] as? Double ?? 0) > 0
+                && ((w[kCGWindowBounds as String] as? [String: Any])?["Height"] as? Double ?? 0) > 30
         }
     }
 
