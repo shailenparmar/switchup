@@ -1,4 +1,4 @@
-// Renders the SwitchUp app icon (gamecontroller symbol on a rounded red→orange tile) to AppIcon.icns.
+// Renders the SwitchUp app icon (white gamecontroller symbol on a black rounded tile) to AppIcon.icns.
 import AppKit
 let out = CommandLine.arguments[1]
 let set = out + "/AppIcon.iconset"
@@ -12,8 +12,11 @@ func render(_ px: Int) -> Data {
     let s = CGFloat(px), inset = s * 0.1
     let tile = NSRect(x: inset, y: inset, width: s - 2 * inset, height: s - 2 * inset)
     let path = NSBezierPath(roundedRect: tile, xRadius: tile.width * 0.225, yRadius: tile.width * 0.225)
-    NSGradient(starting: NSColor(red: 0.98, green: 0.27, blue: 0.24, alpha: 1),
-               ending: NSColor(red: 1.0, green: 0.55, blue: 0.18, alpha: 1))!.draw(in: path, angle: -60)
+    NSColor.black.setFill()
+    path.fill()
+    NSColor(white: 1, alpha: 0.18).setStroke()   // faint edge so the tile reads on dark backgrounds
+    path.lineWidth = max(1, s * 0.006)
+    path.stroke()
     let cfg = NSImage.SymbolConfiguration(pointSize: s * 0.42, weight: .semibold)
         .applying(.init(paletteColors: [.white]))
     if let sym = NSImage(systemSymbolName: "gamecontroller.fill", accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
