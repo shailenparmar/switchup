@@ -190,14 +190,14 @@ struct Config: Codable, Equatable {
     var playerLED = true
 
     static let defaultBindings: [ButtonID: Mapping] = [
-        .a: .init(action: .leftClick), .b: .init(action: .rightClick),
+        .a: .init(action: .leftClick), .b: .init(action: .precisionToggle),
         .x: .init(action: .closeTab), .y: .init(action: .spotlight),
         .zl: .init(action: .desktopPrev), .zr: .init(action: .desktopNext),
         .l: .init(action: .prevTab), .r: .init(action: .nextTab),
         .plus: .init(action: .dictationHold), .minus: .init(action: .deleteWord),
         .dpadLeft: .init(action: .appSwitchPrev), .dpadRight: .init(action: .appSwitchNext),
-        .dpadUp: .init(action: .missionControl), .dpadDown: .init(action: .showDesktop),
-        .l3: .init(action: .precisionToggle), .r3: .init(action: .addressBar),
+        .dpadUp: .init(action: .volumeUp), .dpadDown: .init(action: .volumeDown),
+        .l3: .init(action: .addressBar), .r3: .init(action: .rightClick),
         .home: .init(action: .enter), .capture: .init(action: .escape),
     ]
 
