@@ -164,7 +164,7 @@ struct Config: Codable, Equatable {
     var scrollStyle = ScrollStyle.trackpad      // trackpad = two-finger gestures (swipe notifications, page swipes)
     var scrollMomentum = true
     var momentumDecay = 0.95             // velocity kept per 1/120 s after release
-    var scrollMaxSpeed = 1800.0
+    var scrollMaxSpeed = 1389.2
     var scrollMinSpeed = 0.0
     var scrollExponent = 2.0
     var scrollDeadzone = 0.0

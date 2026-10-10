@@ -31,9 +31,13 @@ final class Synth {
 
     var cursor: CGPoint { CGEvent(source: nil)?.location ?? .zero }
 
-    func move(to p: CGPoint, leftHeld: Bool) {
+    func move(to p: CGPoint, from old: CGPoint, leftHeld: Bool) {
         guard let e = CGEvent(mouseEventSource: src, mouseType: leftHeld ? .leftMouseDragged : .mouseMoved,
                               mouseCursorPosition: p, mouseButton: .left) else { return }
+        // macOS Zoom ignores the absolute position while zoomed in and moves/pans by the deltas,
+        // which synthetic events leave at 0 — without these the pointer freezes once zoomed.
+        e.setDoubleValueField(.mouseEventDeltaX, value: p.x - old.x)
+        e.setDoubleValueField(.mouseEventDeltaY, value: p.y - old.y)
         e.flags = []
         e.post(tap: .cghidEventTap)
     }
@@ -59,7 +63,7 @@ final class Synth {
         else { return }
         e.setIntegerValueField(.mouseEventClickState, value: Int64(clickCount))
         // Always explicit: the shared source remembers ⌃ from ⌃⇥/⌃← taps, and ⌃-click = right click.
-        e.flags = flags
+        e.flags = flags.union(commandHeld ? [.maskCommand] : [])
         e.post(tap: .cghidEventTap)
     }
 
@@ -80,7 +84,7 @@ final class Synth {
     func scroll(dy: Int32, dx: Int32) {
         guard let e = CGEvent(scrollWheelEvent2Source: src, units: .pixel, wheelCount: 2,
                               wheel1: dy, wheel2: dx, wheel3: 0) else { return }
-        e.flags = []   // a leftover ⌃ would turn scrolling into zoom
+        e.flags = scrollFlags   // a leftover ⌃ would turn scrolling into zoom
         e.post(tap: .cghidEventTap)
     }
 
@@ -101,8 +105,8 @@ final class Synth {
         s.setIntegerValueField(f(94), value: Int64(lx * 65536))
         s.setIntegerValueField(f(99), value: phase)
         s.setIntegerValueField(f(123), value: momentum)
-        s.flags = []
-        s.post(tap: .cgSessionEventTap)
+        s.flags = scrollFlags
+        s.post(tap: commandHeld ? .cghidEventTap : .cgSessionEventTap)
         guard phase != 0 else { return }
         let g = CGEvent(source: nil)!
         g.setIntegerValueField(f(55), value: 29)                 // gesture
@@ -110,7 +114,16 @@ final class Synth {
         g.setDoubleValueField(f(116), value: dx == 0 ? -0.0 : dx * 1.67)
         g.setDoubleValueField(f(119), value: dy == 0 ? -0.0 : dy * 1.67)
         g.setIntegerValueField(f(132), value: phase)
-        g.post(tap: .cgSessionEventTap)
+        g.flags = scrollFlags
+        g.post(tap: commandHeld ? .cghidEventTap : .cgSessionEventTap)
+    }
+
+    /// L + R chord: scrolls carry ⌘ (macOS Zoom's "scroll gesture with modifier key").
+    /// L + R chord held = ⌘ held: a real ⌘ key-down, and clicks/scrolls carry the flag.
+    var commandHeld = false { didSet { if commandHeld != oldValue { command(down: commandHeld) } } }
+    /// ⌘ flag for synthetic scrolls while the L+R chord is held (real key also posted via command(down:)).
+    private var scrollFlags: CGEventFlags {
+        commandHeld ? CGEventFlags(rawValue: CGEventFlags.maskCommand.rawValue | 0x08) : []
     }
 
     let naturalScrolling = UserDefaults.standard.persistentDomain(forName: UserDefaults.globalDomain)?["com.apple.swipescrolldirection"] as? Bool ?? true
@@ -121,6 +134,13 @@ final class Synth {
         // Real arrow-key events carry these; Spaces switching wants them.
         if (Key.left...Key.up).contains(code) { f.formUnion([.maskSecondaryFn, .maskNumericPad]) }
         e.flags = f
+        e.post(tap: .cghidEventTap)
+    }
+
+    func zoomKey(_ code: CGKeyCode, down: Bool, autorepeat: Bool = false) {
+        guard let e = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: down) else { return }
+        e.flags = [.maskCommand, .maskAlternate]
+        if autorepeat { e.setIntegerValueField(.keyboardEventAutorepeat, value: 1) }
         e.post(tap: .cghidEventTap)
     }
 
@@ -174,6 +194,10 @@ final class SwitchUp {
     private var active: [ButtonID: Mapping] = [:]      // what each held button is doing
     private var repeaters: [ButtonID: Timer] = [:]
     private var switcherOpen = false
+    private var chordPending: [ButtonID: DispatchWorkItem] = [:]
+    private var chordHeld: Set<ButtonID> = []
+    private var zoomKey: CGKeyCode?
+    private var zoomNextRepeat = Date.distantPast
     private var switcherCommit: DispatchWorkItem?
     private var tickCount = 0
     private var dictationPressedAt: Date?
@@ -201,6 +225,16 @@ final class SwitchUp {
         if let ctl = GCController.controllers().first(where: { $0.extendedGamepad != nil }) { attach(ctl) }
         restartTimer()
         startRawHome()
+        // Watchdog: if a controller is paired but we missed its connect notification
+        // (e.g. app quit and reopened while it was already connected), pick it up.
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            guard let self, self.controller == nil else { return }
+            if let ctl = GCController.controllers().first(where: { $0.extendedGamepad != nil }) {
+                self.attach(ctl)
+            } else {
+                GCController.startWirelessControllerDiscovery {}
+            }
+        }
     }
 
     /// macOS keeps the Home button for itself (it never reaches GameController apps),
@@ -268,6 +302,19 @@ final class SwitchUp {
         if pressed { live.pressed.insert(id) } else { live.pressed.remove(id) }
 
         guard pressed else {
+            // Either half of the L+R chord letting go ends the held ⌘.
+            if chordHeld.contains(id) {
+                chordHeld.removeAll()
+                synth.commandHeld = false
+                return
+            }
+            // Released before the chord window closed: it was a plain tap, fire it now.
+            if let w = chordPending.removeValue(forKey: id) {
+                w.cancel()
+                let m = c.mapping(id)
+                perform(m, pressed: true); perform(m, pressed: false)
+                return
+            }
             stopRepeat(id)
             if let m = active.removeValue(forKey: id) { perform(m, pressed: false) }
             return
@@ -278,6 +325,33 @@ final class SwitchUp {
         // Any other button while ⌘⇥ is open commits the switch and is swallowed.
         if switcherOpen, m.action != .appSwitchNext, m.action != .appSwitchPrev {
             commitSwitcher()
+            return
+        }
+
+        // ZL + ZR together = Mission Control (like a four-finger swipe up). Each trigger waits
+        // a beat so a simultaneous press isn't first treated as a desktop switch.
+        // L + R together = hold ⌘ (for scroll-to-zoom) until either is released.
+        let chordPair: [ButtonID: ButtonID] = [.zl: .zr, .zr: .zl, .l: .r, .r: .l]
+        if let other = chordPair[id] {
+            if let w = chordPending.removeValue(forKey: other) {
+                w.cancel()
+                if id == .l || id == .r {
+                    chordHeld = [id, other]
+                    synth.commandHeld = true
+                } else {
+                    perform(Mapping(action: .missionControl), pressed: true)
+                }
+                return
+            }
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.chordPending[id] = nil
+                self.active[id] = m
+                self.perform(m, pressed: true)
+                if m.action.repeats { self.startRepeat(id, m) }
+            }
+            chordPending[id] = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + ((id == .l || id == .r) ? 0.02 : 0.03), execute: work)
             return
         }
 
@@ -529,6 +603,8 @@ final class SwitchUp {
         active.removeAll()
         if leftHolders > 0 { leftHolders = 0; synth.mouse(.left, down: false) }
         commitSwitcher()
+        chordHeld.removeAll(); synth.commandHeld = false
+        if let k = zoomKey { synth.zoomKey(k, down: false); zoomKey = nil }
         precisionHeld = false; turboHeld = false; scrollModeHeld = false
     }
 
@@ -589,17 +665,37 @@ final class SwitchUp {
         if velocity != .zero {
             let actual = synth.cursor
             var p = pos ?? actual
-            if hypot(p.x - actual.x, p.y - actual.y) > 1.5 { p = actual }   // trackpad moved it
+            let resynced = hypot(p.x - actual.x, p.y - actual.y) > 1.5
+            if resynced { p = actual }   // trackpad moved it
             let next = clamp(CGPoint(x: p.x + velocity.x * dt, y: p.y - velocity.y * dt), from: p)
             pos = next
-            synth.move(to: next, leftHeld: leftHolders > 0)
+            synth.move(to: next, from: p, leftHeld: leftHolders > 0)
         } else {
             pos = nil
         }
 
         // Scroll
         let sv = vector(sx, sy, shape: .radial, cfg.scrollResponse)
-        if cfg.scrollStyle == .trackpad {
+        // While L+R (⌘) is held the stick zooms: Zoom ignores synthetic ⌘-scrolls but animates smoothly
+        // while its ⌥⌘= / ⌥⌘− shortcut is held down, so hold one key down for as long as the stick is tilted.
+        let zoomWant: CGKeyCode? = synth.commandHeld && sv.y != 0 ? (sv.y > 0 ? 24 : 27) : nil
+        if zoomWant != zoomKey {
+            if let k = zoomKey { synth.zoomKey(k, down: false) }
+            if let k = zoomWant { synth.zoomKey(k, down: true) }
+            zoomKey = zoomWant
+            zoomNextRepeat = Date().addingTimeInterval(0.03)
+        }
+        // Keep typing-repeat events flowing at a steady rate while held, like a real keyboard's auto-repeat.
+        if let k = zoomKey, Date() >= zoomNextRepeat {
+            // The held key animates at Zoom's own fixed pace (repeat rate doesn't change it), so speed comes
+            // from distinct key presses: each up+down is another zoom step.
+            synth.zoomKey(k, down: false)
+            synth.zoomKey(k, down: true)
+            zoomNextRepeat = Date().addingTimeInterval(1.0 / 70.875)
+        }
+        if synth.commandHeld {
+            // stick drives zoom, not scroll
+        } else if cfg.scrollStyle == .trackpad {
             trackpadScroll(sv, dt: dt, cfg: cfg)
         } else if sv != .zero {
             scrollRemainder.x += (cfg.scrollHorizontal ? -sv.x : 0) * dt * (cfg.scrollInvertX ? -1 : 1)
