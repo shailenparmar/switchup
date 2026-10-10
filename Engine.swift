@@ -3,7 +3,9 @@
 import AppKit
 import ApplicationServices
 import GameController
+import IOKit
 import IOKit.hid
+import IOKit.hidsystem
 
 enum Key {
     static let left: CGKeyCode = 123, right: CGKeyCode = 124, down: CGKeyCode = 125, up: CGKeyCode = 126
@@ -31,13 +33,34 @@ final class Synth {
 
     var cursor: CGPoint { CGEvent(source: nil)?.location ?? .zero }
 
+    /// While macOS Zoom is zoomed in, cursor moves go through IOHIDSystem (the path a real mouse takes):
+    /// Zoom pans to follow those, but ignores synthetic CGEvent moves (the cursor stalls at the viewport edge).
+    /// Unzoomed, moves stay plain CGEvents.
+    private lazy var hidConn: io_connect_t = {
+        var c: io_connect_t = 0
+        let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(kIOHIDSystemClass))
+        guard svc != 0, IOServiceOpen(svc, mach_task_self_, UInt32(kIOHIDParamConnectType), &c) == KERN_SUCCESS else { return 0 }
+        return c
+    }()
+    private var moveRemainder = CGPoint.zero
+    private var zoomed = false, zoomedCheckedAt = Date.distantPast
+
     func move(to p: CGPoint, from old: CGPoint, leftHeld: Bool) {
+        if Date().timeIntervalSince(zoomedCheckedAt) > 0.25 { zoomed = UAZoomEnabled(); zoomedCheckedAt = Date() }
+        if zoomed, hidConn != 0 {
+            moveRemainder.x += p.x - old.x; moveRemainder.y += p.y - old.y
+            let dx = moveRemainder.x.rounded(.towardZero), dy = moveRemainder.y.rounded(.towardZero)
+            guard dx != 0 || dy != 0 else { return }
+            moveRemainder.x -= dx; moveRemainder.y -= dy
+            var ev = NXEventData()
+            ev.mouseMove.dx = Int32(dx); ev.mouseMove.dy = Int32(dy)
+            let type = leftHeld ? NX_LMOUSEDRAGGED : NX_MOUSEMOVED
+            if IOHIDPostEvent(hidConn, UInt32(type), IOGPoint(x: 0, y: 0), &ev, UInt32(kNXEventDataVersion), 0,
+                              UInt32(kIOHIDSetRelativeCursorPosition)) == KERN_SUCCESS { return }
+        }
+        moveRemainder = .zero
         guard let e = CGEvent(mouseEventSource: src, mouseType: leftHeld ? .leftMouseDragged : .mouseMoved,
                               mouseCursorPosition: p, mouseButton: .left) else { return }
-        // macOS Zoom ignores the absolute position while zoomed in and moves/pans by the deltas,
-        // which synthetic events leave at 0 — without these the pointer freezes once zoomed.
-        e.setDoubleValueField(.mouseEventDeltaX, value: p.x - old.x)
-        e.setDoubleValueField(.mouseEventDeltaY, value: p.y - old.y)
         e.flags = []
         e.post(tap: .cghidEventTap)
     }
