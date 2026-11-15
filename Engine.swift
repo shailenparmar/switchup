@@ -253,6 +253,7 @@ final class SwitchUp {
     private var hidManager: IOHIDManager?
     private let hidBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 512)
     private var homeDown = false
+    private var homeHold: DispatchWorkItem?
     private var gestureActive = false, momentumActive = false, momentumStarted = false
     private var lastScrollVelocity = CGPoint.zero, momentumVelocity = CGPoint.zero
 
@@ -306,10 +307,26 @@ final class SwitchUp {
     }
 
     /// Both the raw reader and GameController feed Home through here; only edges count.
+    /// Holding Home pauses / resumes SwitchUp (works while paused); a quick tap does Home's mapped action.
     private func homeChanged(_ down: Bool) {
         guard down != homeDown else { return }
         homeDown = down
-        handle(.home, down)
+        if down {
+            live.pressed.insert(.home)
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.homeHold = nil
+                self.enabled.toggle()
+            }
+            homeHold = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+        } else {
+            live.pressed.remove(.home)
+            if let w = homeHold {   // released before the hold fired: it was a tap
+                w.cancel(); homeHold = nil
+                handle(.home, true); handle(.home, false)
+            }
+        }
     }
 
     private func restartTimer() {
@@ -368,14 +385,6 @@ final class SwitchUp {
             if let m = active.removeValue(forKey: id) { perform(m, pressed: false) }
             return
         }
-        // A + B + X + Y together = pause / resume SwitchUp, whatever the buttons are mapped to.
-        // Works while paused too; the button that completes the chord is swallowed.
-        let faceButtons: Set<ButtonID> = [.a, .b, .x, .y]
-        if faceButtons.contains(id), faceButtons.isSubset(of: live.pressed) {
-            enabled.toggle()   // pausing releases whatever the other three started
-            return
-        }
-
         let m = c.mapping(id)
         guard enabled || m.action == .pauseSwitchUp else { return }
 
