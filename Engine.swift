@@ -45,9 +45,31 @@ final class Synth {
     private var moveRemainder = CGPoint.zero
     private var zoomed = false, zoomedCheckedAt = Date.distantPast
 
-    func move(to p: CGPoint, from old: CGPoint, leftHeld: Bool) {
+    private func zoomActive() -> Bool {
         if Date().timeIntervalSince(zoomedCheckedAt) > 0.25 { zoomed = UAZoomEnabled(); zoomedCheckedAt = Date() }
-        if zoomed, hidConn != 0 {
+        return zoomed && hidConn != 0
+    }
+
+    /// Button press/release through IOHIDSystem at the current cursor spot (clicks must follow moves while zoomed).
+    private func hidButton(_ button: CGMouseButton, down: Bool, clickState: Int, flags: CGEventFlags) -> Bool {
+        let type: Int32 = switch (button, down) {
+        case (.left, true): NX_LMOUSEDOWN
+        case (.left, false): NX_LMOUSEUP
+        case (.right, true): NX_RMOUSEDOWN
+        case (.right, false): NX_RMOUSEUP
+        case (_, true): NX_OMOUSEDOWN
+        case (_, false): NX_OMOUSEUP
+        }
+        var ev = NXEventData()
+        ev.mouse.buttonNumber = UInt8(truncatingIfNeeded: button.rawValue)
+        ev.mouse.click = Int32(clickState)
+        ev.mouse.pressure = down ? 255 : 0
+        return IOHIDPostEvent(hidConn, UInt32(type), IOGPoint(x: 0, y: 0), &ev, UInt32(kNXEventDataVersion),
+                              UInt32(truncatingIfNeeded: flags.rawValue), 0) == KERN_SUCCESS
+    }
+
+    func move(to p: CGPoint, from old: CGPoint, leftHeld: Bool) {
+        if zoomActive() {
             moveRemainder.x += p.x - old.x; moveRemainder.y += p.y - old.y
             let dx = moveRemainder.x.rounded(.towardZero), dy = moveRemainder.y.rounded(.towardZero)
             guard dx != 0 || dy != 0 else { return }
@@ -82,18 +104,22 @@ final class Synth {
             lastDown = now
             lastDownPoint = p
         }
+        // Always explicit: the shared source remembers ⌃ from ⌃⇥/⌃← taps, and ⌃-click = right click.
+        let f = flags.union(commandHeld ? [.maskCommand] : [])
+        if zoomActive(), hidButton(button, down: down, clickState: clickCount, flags: f) { return }
         guard let e = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: p, mouseButton: button)
         else { return }
         e.setIntegerValueField(.mouseEventClickState, value: Int64(clickCount))
-        // Always explicit: the shared source remembers ⌃ from ⌃⇥/⌃← taps, and ⌃-click = right click.
-        e.flags = flags.union(commandHeld ? [.maskCommand] : [])
+        e.flags = f
         e.post(tap: .cghidEventTap)
     }
 
     func doubleClick() {
         let p = cursor
+        let viaHID = zoomActive()
         for state in [1, 2] as [Int64] {
             for type in [CGEventType.leftMouseDown, .leftMouseUp] {
+                if viaHID, hidButton(.left, down: type == .leftMouseDown, clickState: Int(state), flags: []) { continue }
                 guard let e = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: p, mouseButton: .left)
                 else { continue }
                 e.setIntegerValueField(.mouseEventClickState, value: state)
@@ -342,6 +368,14 @@ final class SwitchUp {
             if let m = active.removeValue(forKey: id) { perform(m, pressed: false) }
             return
         }
+        // A + B + X + Y together = pause / resume SwitchUp, whatever the buttons are mapped to.
+        // Works while paused too; the button that completes the chord is swallowed.
+        let faceButtons: Set<ButtonID> = [.a, .b, .x, .y]
+        if faceButtons.contains(id), faceButtons.isSubset(of: live.pressed) {
+            enabled.toggle()   // pausing releases whatever the other three started
+            return
+        }
+
         let m = c.mapping(id)
         guard enabled || m.action == .pauseSwitchUp else { return }
 
@@ -714,7 +748,7 @@ final class SwitchUp {
             // from distinct key presses: each up+down is another zoom step.
             synth.zoomKey(k, down: false)
             synth.zoomKey(k, down: true)
-            zoomNextRepeat = Date().addingTimeInterval(1.0 / 70.875)
+            zoomNextRepeat = Date().addingTimeInterval(1.0 / 49.6125)
         }
         if synth.commandHeld {
             // stick drives zoom, not scroll
